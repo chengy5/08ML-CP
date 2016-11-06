@@ -1,0 +1,209 @@
+---
+title       : course project
+subtitle    :
+hitheme     : tomorrow   #
+url:
+  data: ./data
+mode        : selfcontained # {standalone, draft}
+---
+
+```{r setup, cache = F, echo = F, message = F, warning = F, tidy = F}
+library(knitr)
+# make this an external chunk that can be included in any file
+options(width = 100)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA, fig.align = 'center', dpi = 100, tidy = F, cache.path = '.cache/', fig.path = 'fig/',cache=TRUE)
+
+options(xtable.type = 'html')
+knit_hooks$set(inline = function(x) {
+  if(is.numeric(x)) {
+    round(x, getOption('digits'))
+  } else {
+    paste(as.character(x), collapse = ', ')
+  }
+})
+knit_hooks$set(plot = knitr:::hook_plot_html)
+```
+# The goal
+here we'll be predicting the "classe" variable for testing set based on correlaton between the "classe" variable in the training set and other variables in the training set.
+
+"classe" is the manner in which few persons did some exercises. 
+
+# Preparations
+
+## Getting Data
+```{r data}
+getDataset <- function(url, filename) {
+    if (!file.exists(filename)) {
+        download.file(url,destfile=filename,method="curl")
+    }
+    read.csv(filename, na.strings=c("NA","#DIV/0!",""))
+}
+
+trainUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+training <- getDataset(trainUrl,"pml-training.csv")
+testing <- getDataset(trainUrl,"pml-testing.csv")
+``` 
+
+## Train and test to select better method
+```{r}
+inTrain <- createDataPartition(y=training$classe, p=0.6, list=FALSE)
+trainTraining <- training[inTrain, ]
+testTraining <- training[-inTrain, ]
+dim(trainTraining)
+dim(testTraining)
+```
+
+## Filter empty columns
+“classe” is an unordered factor variable. So in general our problem is classification. And we need to detect features (variables) that are important for solving our problem. 
+
+```{r getData, dependson=data}
+library(caret)
+
+nzVarsFileName <- 'nearZeroVars.Rdata'
+
+if (file.exists(nzVarsFileName)) {
+    load(file=nzVarsFileName) # nzVars will be available
+} else {
+    nzVars <- nearZeroVar(trainTraining, saveMetrics=TRUE)
+    # use it later
+    save(nzVars, file=nzVarsFileName)
+}
+trainingCleaned <- trainTraining[,!nzVars$nzv]
+dim(trainingCleaned)
+```
+
+## Filter almost empty columns
+```{r}
+countNaRatio <- colSums(is.na(trainingCleaned)) / nrow(trainingCleaned)
+almostNaCols <- which(countNaRatio > 0.66) 
+trainingCleaned <- trainingCleaned[,-almostNaCols]
+dim(trainingCleaned)
+
+irrelevantCols <- grep("X|user_name|timestamp|_window",names(trainingCleaned))
+trainingCleaned <- trainingCleaned[,-irrelevantCols]
+dim(trainingCleaned)
+```
+
+# Train few models
+Trees, random forest, boosting are among the methods that are ok with detecting features for a classification problem.
+
+## Random forest
+```{r }
+library(caret)
+library(randomForest)
+set.seed(8001)
+
+modelFitRFFileName <- 'modelFitRF.Rdata'
+if (file.exists(modelFitRFFileName)) {
+    load(file=modelFitRFFileName) # modelFitRF will be available
+} else {
+    modelFitRF <- randomForest(classe~., data=trainingCleaned, type="class")
+    # use it later
+    save(modelFitRF, file=modelFitRFFileName)
+}
+
+```
+
+## Decision Tree
+Presumably here the out of sample error (1 - accuracy) will be not so small. 
+```{r fancyRpartPlot}
+library(rpart)
+set.seed(8001)
+modelFitDT <- rpart(classe ~ ., data=trainingCleaned, method="class")
+
+library(rattle)
+fancyRpartPlot(modelFitDT)
+```
+
+## Add cross-validation
+See if we can improve accuracy
+```{r}
+trCtrl <- trainControl(method="cv", number=7, verboseIter=FALSE,
+                       preProcOptions="pca", allowParallel=TRUE)
+```
+
+### Random forest + control 
+```{r}
+modelFitRFWithControlFileName <- 'modelFitRFWithControl.Rdata'
+if (file.exists(modelFitRFWithControlFileName)) {
+    load(file=modelFitRFWithControlFileName) 
+    # modelFitRFWithControl will be available
+} else {
+    modelFitRFWithControl <- train(classe~., 
+                                   data=trainingCleaned, 
+                                   method="rf", trControl=trCtrl)
+    # use it later
+    save(modelFitRFWithControl, file=modelFitRFWithControlFileName)
+}
+```
+
+### Decision tree + control 
+```{r}
+modelFitDTWithControlFileName <- 'modelFitDTWithControl.Rdata'
+if (file.exists(modelFitDTWithControlFileName)) {
+    load(file=modelFitDTWithControlFileName) 
+    # modelFitRFWithControl will be available
+} else {
+    modelFitDTWithControl <- train(classe~., 
+                                   data=trainingCleaned, 
+                                   method="rpart", trControl=trCtrl)
+    # use it later
+    save(modelFitDTWithControl, file=modelFitDTWithControlFileName)
+}
+```
+
+### Boosting + control
+```{r}
+modelFitGMBWithControlFileName='modelFitGMBWithControl.Rdata'
+if (file.exists(modelFitGMBWithControlFileName)) {
+    load(file=modelFitGMBWithControlFileName) 
+    # modelFitRFWithControl will be available
+} else {
+    modelFitGMBWithControl <- train(classe~., 
+                                   data=trainingCleaned, 
+                                   method="gbm", trControl=trCtrl)
+    # use it later
+    save(modelFitGMBWithControl, file=modelFitGMBWithControlFileName)
+}
+```
+
+## Which model is better?
+```{r}
+
+getMatrix <- function(modelFit, dataset, predType='class') {
+    yCol <- grep("classe",names(dataset))
+    
+    prediction <- predict(modelFit,
+                          newdata=dataset[,-yCol], type=predType)
+    # show only accuracy
+    confusionMatrix(prediction, dataset$classe)$overall["Accuracy"]
+}
+
+# reduce columns to those that were used in training
+testTrainingCleaned <- testTraining[,names(trainingCleaned)]
+
+getMatrix(modelFitDT, testTrainingCleaned)
+getMatrix(modelFitRF, testTrainingCleaned)
+getMatrix(modelFitDTWithControl, testTrainingCleaned, 'raw')
+getMatrix(modelFitRFWithControl, testTrainingCleaned, 'raw')
+getMatrix(modelFitGMBWithControl, testTrainingCleaned, 'raw')
+```
+Cross-validation is not helping. There is no big difference between train with controls or without controls when using random forest formula. But training with controls is much slower.
+
+And the winner is (wait for it...) Random Forest method!
+
+## Answers
+```{r}
+p1 <- predict(modelFitRF, newdata=testing, type='class')
+p2 <- predict(modelFitGMBWithControl, newdata=testing, type='raw')
+p3 <- predict(modelFitRFWithControl, newdata=testing, type='raw')
+# hide output
+```
+Answers are all the same.
+
+# Acknowledgements
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. They have been very generous in allowing their data to be used for this kind of assignment.
+
+More information is available from the website (see the section on the Weight Lifting Exercise Dataset).
